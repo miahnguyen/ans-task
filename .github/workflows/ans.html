@@ -1,0 +1,453 @@
+<head>
+<!-- jsPsych core -->
+<script src="https://unpkg.com/jspsych@6.3.1/jspsych.js"></script>
+<link   href="https://unpkg.com/jspsych@6.3.1/css/jspsych.css" rel="stylesheet">
+
+<!-- Plugins -->
+<script src="https://unpkg.com/jspsych@6.3.1/plugins/jspsych-html-keyboard-response.js"></script>
+<script src="https://unpkg.com/jspsych@6.3.1/plugins/jspsych-canvas-keyboard-response.js"></script>
+
+<style>
+  #stop-button {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 10px 20px;
+    background-color: #d9534f;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    font-size: 16px;
+    cursor: pointer;
+    z-index: 9999;
+    display: none;
+  }
+  #stop-button:hover {
+    background-color: #c9302c;
+  }
+</style>
+</head>
+
+<body>
+<div id="jspsych-target"></div>
+<button id="stop-button">Stop Task</button>
+
+<script>
+// ===========================
+// ANS Task (jsPsych)
+// ===========================
+
+// ------- Parameters (tweak as needed) -------
+const taskDurationMinutes = 1; // Total task duration in minutes
+const taskDurationMs = taskDurationMinutes * 60 * 1000; // Convert to milliseconds
+const stimDuration = 1000; // ms - stimulus display time
+const fixationDuration = 500; // ms
+const isiDuration = 250; // ms between stimulus and response
+const canvasSize = { w: 1200, h: 600 }; // canvas width/height
+const dividerMargin = 20; // Keep dots this far from the center divider
+const leftArea = { x: 0, y: 0, w: (canvasSize.w/2) - dividerMargin, h: canvasSize.h };
+const rightArea = { x: (canvasSize.w/2) + dividerMargin, y: 0, w: (canvasSize.w/2) - dividerMargin, h: canvasSize.h };
+const dotRadiusRange = [4, 12]; // px
+const minDotSpacing = 2; // px extra gap between dot edges (smaller -> more dense)
+const numerosityRange = [6, 40]; // possible base numerosities
+const ratios = [1.1, 1.2, 1.5, 2]; // target ratios to sample from
+const responseKeys = ['f','j']; // f = left, j = right
+
+// Global variables for timing and control
+let taskStartTime = null;
+let taskEndTime = null;
+let shouldStopTask = false;
+let timerInterval = null;
+
+// Helper: uniform integer inclusive
+function rint(min, max) {
+  return Math.floor(Math.random()*(max-min+1)) + min;
+}
+
+// Helper: random choice
+function choice(arr){ return arr[Math.floor(Math.random()*arr.length)]; }
+
+// Fixed generateDotPositions that respects canvas boundaries and dividing line
+function generateDotPositions(count, bbox, radiiRange, minSpacing, maxAttemptsPerDot=300) {
+  const dots = [];
+  const maxR = radiiRange[1];
+  const minR = radiiRange[0];
+  
+  // Calculate safe bounds:
+  // - Must keep dots maxR away from all edges of the bbox
+  // - bbox already accounts for the divider margin, so we just need to respect bbox boundaries
+  const safeMinX = bbox.x + maxR;
+  const safeMaxX = bbox.x + bbox.w - maxR;
+  const safeMinY = bbox.y + maxR;
+  const safeMaxY = bbox.y + bbox.h - maxR;
+  
+  // Validate that we have enough space
+  if (safeMinX >= safeMaxX || safeMinY >= safeMaxY) {
+    console.error("Bbox too small for dots of this size", bbox, radiiRange);
+    return []; // Return empty array if impossible
+  }
+  
+  for (let i = 0; i < count; i++) {
+    let placed = false;
+    let attempts = 0;
+    
+    while (!placed && attempts < maxAttemptsPerDot) {
+      attempts++;
+      
+      // Choose radius first
+      const r = rint(minR, maxR);
+      
+      // Constrain position based on THIS dot's radius
+      // The dot center must be at least r pixels from any bbox edge
+      const minX = bbox.x + r;
+      const maxX = bbox.x + bbox.w - r;
+      const minY = bbox.y + r;
+      const maxY = bbox.y + bbox.h - r;
+      
+      // Ensure valid range
+      if (minX > maxX || minY > maxY) {
+        // This radius is too large for the space, try a smaller one
+        continue;
+      }
+      
+      const x = rint(Math.ceil(minX), Math.floor(maxX));
+      const y = rint(Math.ceil(minY), Math.floor(maxY));
+      
+      // Double-check bounds (safety)
+      if (x - r < bbox.x || x + r > bbox.x + bbox.w ||
+          y - r < bbox.y || y + r > bbox.y + bbox.h) {
+        continue; // Skip this attempt if somehow out of bounds
+      }
+      
+      // Check overlaps with existing dots
+      let ok = true;
+      for (const d of dots) {
+        const dx = d.x - x;
+        const dy = d.y - y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist < (d.r + r + minSpacing)) {
+          ok = false;
+          break;
+        }
+      }
+      
+      if (ok) {
+        dots.push({x, y, r});
+        placed = true;
+      }
+    }
+    
+    // If we couldn't place after many attempts, try with relaxed spacing
+    if (!placed) {
+      for (let relaxAttempt = 0; relaxAttempt < 20 && !placed; relaxAttempt++) {
+        const r = rint(minR, maxR);
+        const minX = bbox.x + r;
+        const maxX = bbox.x + bbox.w - r;
+        const minY = bbox.y + r;
+        const maxY = bbox.y + bbox.h - r;
+        
+        if (minX > maxX || minY > maxY) continue;
+        
+        const x = rint(Math.ceil(minX), Math.floor(maxX));
+        const y = rint(Math.ceil(minY), Math.floor(maxY));
+        
+        // Double-check bounds
+        if (x - r < bbox.x || x + r > bbox.x + bbox.w ||
+            y - r < bbox.y || y + r > bbox.y + bbox.h) {
+          continue;
+        }
+        
+        // More lenient overlap check
+        let ok = true;
+        const relaxedSpacing = Math.max(0, minSpacing - relaxAttempt * 0.2);
+        for (const d of dots) {
+          const dx = d.x - x;
+          const dy = d.y - y;
+          const dist = Math.sqrt(dx*dx + dy*dy);
+          if (dist < (d.r + r + relaxedSpacing)) {
+            ok = false;
+            break;
+          }
+        }
+        
+        if (ok) {
+          dots.push({x, y, r});
+          placed = true;
+        }
+      }
+    }
+    
+    // Final fallback: place smallest dot in center of bbox
+    if (!placed) {
+      const r = minR;
+      const centerX = bbox.x + bbox.w / 2;
+      const centerY = bbox.y + bbox.h / 2;
+      
+      // Ensure center is valid
+      if (centerX - r >= bbox.x && centerX + r <= bbox.x + bbox.w &&
+          centerY - r >= bbox.y && centerY + r <= bbox.y + bbox.h) {
+        dots.push({x: centerX, y: centerY, r});
+      }
+    }
+  }
+  
+  return dots;
+}
+
+// Generate a single trial spec
+function makeTrial() {
+  // pick ratio and base numerosity
+  const ratio = choice(ratios);
+  // choose base such that product will remain in allowed range
+  const baseMin = numerosityRange[0];
+  const baseMax = numerosityRange[1];
+  let base = rint(baseMin, baseMax);
+  let larger = Math.round(base * ratio);
+  // ensure both within numerosityRange, if not adjust base down/up
+  if (larger < numerosityRange[0]) {
+    base = Math.ceil(numerosityRange[0] / ratio);
+    larger = Math.round(base * ratio);
+  } else if (larger > numerosityRange[1]) {
+    base = Math.floor(numerosityRange[1] / ratio);
+    larger = Math.round(base * ratio);
+  }
+  // enforce within bounds again
+  base = Math.max(numerosityRange[0], Math.min(numerosityRange[1], base));
+  larger = Math.max(numerosityRange[0], Math.min(numerosityRange[1], larger));
+
+  // assign left/right randomly
+  const leftIsLarger = Math.random() < 0.5;
+  const leftCount = leftIsLarger ? larger : base;
+  const rightCount = leftIsLarger ? base : larger;
+
+  // generate dot positions
+  const leftDots = generateDotPositions(leftCount, leftArea, dotRadiusRange, minDotSpacing);
+  const rightDots = generateDotPositions(rightCount, rightArea, dotRadiusRange, minDotSpacing);
+
+  return {
+    leftCount,
+    rightCount,
+    ratio: (leftCount>rightCount) ? (leftCount / rightCount) : (rightCount / leftCount),
+    largerSide: leftIsLarger ? 'left' : 'right',
+    leftDots,
+    rightDots
+  };
+}
+
+// Function to check time and stop task if needed
+function checkTimeLimit() {
+  const now = Date.now();
+  if (now >= taskEndTime) {
+    shouldStopTask = true;
+    clearInterval(timerInterval);
+    jsPsych.endCurrentTimeline();
+  }
+}
+
+// Function to check if task should continue
+function shouldContinueTask() {
+  const now = Date.now();
+  return !shouldStopTask && now < taskEndTime;
+}
+
+// Build jsPsych timeline
+const timeline = [];
+
+// Instructions
+timeline.push({
+  type: 'html-keyboard-response',
+  stimulus: `
+    <h3>Approximate Number System (ANS) Task</h3>
+    <p>Two dot arrays will flash briefly (left and right). After a short delay, press <strong>F</strong> if the <strong>left</strong> side had more dots, or <strong>J</strong> if the <strong>right</strong> side had more dots.</p>
+    <p>Try to be both fast and accurate.</p>
+    <p><strong>Duration:</strong> This task will run for ${taskDurationMinutes} minute${taskDurationMinutes > 1 ? 's' : ''}, and you will see as many trials as possible in that time.</p>
+    <p><strong>Stop Button:</strong> You can stop the task at any time by clicking the red "Stop Task" button at the top-right of the screen.</p>
+    <p><em>Press any key to begin.</em></p>
+  `,
+  choices: jsPsych.ALL_KEYS,
+  on_finish: function() {
+    // Initialize task timing
+    taskStartTime = Date.now();
+    taskEndTime = taskStartTime + taskDurationMs;
+    shouldStopTask = false;
+    
+    // Show stop button
+    document.getElementById('stop-button').style.display = 'block';
+    
+    // Start timer check interval
+    timerInterval = setInterval(checkTimeLimit, 100);
+    
+    // Set up stop button
+    document.getElementById('stop-button').onclick = function() {
+      shouldStopTask = true;
+      clearInterval(timerInterval);
+      jsPsych.endExperiment('Task stopped by user. Can add more here');
+    };
+  }
+});
+
+// Main trial loop that generates trials dynamically
+const trialLoop = {
+  timeline: [],
+  loop_function: function() {
+    return shouldContinueTask();
+  },
+  on_timeline_start: function() {
+    // Generate a new trial spec each time the loop starts
+    const spec = makeTrial();
+    
+    // Store spec in a way that the trial can access it
+    jsPsych.data.addProperties({
+      current_trial_spec: spec
+    });
+  }
+};
+
+// Define the trial timeline structure
+// IMPORTANT: Generate trial spec inside on_start to ensure different dots each trial
+trialLoop.timeline = [
+  // fixation
+  {
+    type: 'html-keyboard-response',
+    stimulus: '<div style="font-size:100px; display:flex; justify-content:center; align-items:center; height:50vh;">+</div>',
+    choices: jsPsych.NO_KEYS,
+    trial_duration: fixationDuration,
+    data: {
+      phase: 'fixation'
+    }
+  },
+  // stimulus: draw left and right dot arrays on canvas for stimDuration
+  {
+    type: 'canvas-keyboard-response',
+    canvas_size: [canvasSize.w, canvasSize.h],
+    stimulus: function(c){
+      // Generate new dots for THIS trial
+      const spec = makeTrial();
+      
+      // Store spec for response phase
+      this.trial_spec = spec;
+      
+      const ctx = c.getContext('2d');
+      ctx.clearRect(0,0,c.width,c.height);
+      ctx.fillStyle = 'white';
+      ctx.fillRect(0,0,c.width,c.height);
+
+      // draw a subtle dividing line
+      ctx.strokeStyle = '#cccccc';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(c.width/2, 0);
+      ctx.lineTo(c.width/2, c.height);
+      ctx.stroke();
+
+      // draw left dots
+      for (const d of spec.leftDots){
+        ctx.beginPath();
+        ctx.fillStyle = 'black';
+        ctx.arc(d.x, d.y, d.r, 0, 2*Math.PI);
+        ctx.fill();
+      }
+      // draw right dots
+      for (const d of spec.rightDots){
+        ctx.beginPath();
+        ctx.fillStyle = 'black';
+        ctx.arc(d.x, d.y, d.r, 0, 2*Math.PI);
+        ctx.fill();
+      }
+    },
+    choices: jsPsych.NO_KEYS,
+    trial_duration: stimDuration,
+    data: {
+      trial_type: 'stimulus'
+    },
+    on_finish: function(data) {
+      // Store the spec from stimulus function
+      if (this.trial_spec) {
+        data.leftCount = this.trial_spec.leftCount;
+        data.rightCount = this.trial_spec.rightCount;
+        data.ratio = this.trial_spec.ratio;
+        data.largerSide = this.trial_spec.largerSide;
+        
+        // Store for next trial
+        jsPsych.data.addProperties({
+          last_trial_spec: this.trial_spec
+        });
+      }
+    }
+  },
+  // ISI / mask (brief blank)
+  {
+    type: 'html-keyboard-response',
+    stimulus: '<div></div>',
+    choices: jsPsych.NO_KEYS,
+    trial_duration: isiDuration,
+    data: {
+      phase: 'isi'
+    }
+  },
+  // response screen (collect RT and key)
+  {
+    type: 'html-keyboard-response',
+    stimulus: `
+      <div style="font-size:18px; text-align:center;">
+        <p>Which side had more dots?</p>
+        <p><strong>F</strong> = Left &nbsp;&nbsp;&nbsp; <strong>J</strong> = Right</p>
+        <p style="font-size:14px; color:gray;">Press F or J to respond.</p>
+      </div>
+    `,
+    choices: responseKeys,
+    response_ends_trial: true,
+    data: {
+      trial_type: 'response'
+    },
+    on_start: function(trial) {
+      // Get the spec from the previous stimulus trial
+      const lastSpec = jsPsych.data.get().last(3).values()[1].last_trial_spec;
+      if (lastSpec) {
+        trial.data.leftCount = lastSpec.leftCount;
+        trial.data.rightCount = lastSpec.rightCount;
+        trial.data.ratio = lastSpec.ratio;
+        trial.data.largerSide = lastSpec.largerSide;
+      }
+    },
+    on_finish: function(data){
+      const key = data.response;
+      const left = data.leftCount;
+      const right = data.rightCount;
+      let correct = null;
+      if (left > right && key === 'f') correct = 1;
+      else if (right > left && key === 'j') correct = 1;
+      else correct = 0;
+      data.accuracy = correct;
+      data.choice = (key === 'f' ? 'left' : (key === 'j' ? 'right' : 'none'));
+    }
+  }
+];
+
+timeline.push(trialLoop);
+
+// End screen & save
+timeline.push({
+  type: 'html-keyboard-response',
+  stimulus: `<h3>Thanks — task complete!</h3><p>Your data will be saved now. Press any key to finish.</p>`,
+  choices: jsPsych.ALL_KEYS,
+  on_start: function() {
+    // Hide stop button
+    document.getElementById('stop-button').style.display = 'none';
+    clearInterval(timerInterval);
+  }
+});
+
+// Initialize jsPsych
+jsPsych.init({
+  timeline: timeline,
+  display_element: 'jspsych-target',
+  on_finish: function() {
+    const csv = jsPsych.data.get().filter({trial_type: 'response'}).csv();
+    jsPsych.data.localSave('csv', 'ans_data.csv');
+    console.log("ANS task finished. Response-trial data (CSV):\n", csv);
+  }
+});
+</script>
+</body>
