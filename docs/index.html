@@ -59,6 +59,7 @@ let taskStartTime = null;
 let taskEndTime = null;
 let shouldStopTask = false;
 let timerInterval = null;
+let trialsCompleted = 0;
 
 // Helper: uniform integer inclusive
 function rint(min, max) {
@@ -412,6 +413,10 @@ trialLoop.timeline = [
       }
     },
     on_finish: function(data){
+      // increment the global counter and attach trial number to this response
+      trialsCompleted += 1;
+      data.trialNumber = trialsCompleted;
+
       const key = data.response;
       const left = data.leftCount;
       const right = data.rightCount;
@@ -444,9 +449,33 @@ jsPsych.init({
   timeline: timeline,
   display_element: 'jspsych-target',
   on_finish: function() {
+    const totalTrials = trialsCompleted || jsPsych.data.get().filter({trial_type: 'response'}).count();
+    const accuracyMean = jsPsych.data.get().filter({trial_type: 'response'}).select('accuracy').mean();
     const csv = jsPsych.data.get().filter({trial_type: 'response'}).csv();
     jsPsych.data.localSave('csv', 'ans_data.csv');
     console.log("ANS task finished. Response-trial data (CSV):\n", csv);
+
+    // IF running inside Qualtrics, set Embedded Data fields so Qualtrics stores them with the response.
+    // IMPORTANT: Qualtrics may impose size limits — avoid setting the full CSV into an Embedded Data field for large datasets.
+    if (typeof Qualtrics !== 'undefined' && Qualtrics.SurveyEngine && Qualtrics.SurveyEngine.setEmbeddedData) {
+      try {
+        Qualtrics.SurveyEngine.setEmbeddedData('ans_total_trials', String(totalTrials));
+        Qualtrics.SurveyEngine.setEmbeddedData('ans_mean_accuracy', String(isNaN(accuracyMean) ? '' : accuracyMean.toFixed(3)));
+        // If want to store the whole CSV in Qualtrics embedded data (caution: large!), you can:
+        // Qualtrics.SurveyEngine.setEmbeddedData('ans_data_csv', csv);
+        // Better approach: send CSV to your server and save the URL / ID in an embedded field (see note below).
+      } catch (e) {
+        console.warn("Could not set Qualtrics Embedded Data from jsPsych:", e);
+      }
+    }
+
+    // Send results to Qualtrics iframe listener
+    window.parent.postMessage({
+      type: "JSPSYCH_ANS_COMPLETE",
+      totalTrials: totalTrials,
+      meanAccuracy: accuracyMean,
+      csv: csv
+    }, "*");
   }
 });
 </script>
